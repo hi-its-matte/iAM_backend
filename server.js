@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import admin from "firebase-admin";
+import path from "path";
 
 dotenv.config();
 
@@ -10,47 +12,50 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.OPENROUTER_API_KEY;
 
-const MAX_MESSAGES_PER_DAY = 50;
+import admin from "firebase-admin";
 
-// Stato globale contatore e data di reset
-let messageCount = 0;
-let lastResetDate = new Date().toISOString().split("T")[0];
+// Legge il JSON delle credenziali da variabile d'ambiente
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
-// Funzione per resettare contatore a mezzanotte UTC
-function resetIfNeeded() {
-  const today = new Date().toISOString().split("T")[0];
-  if (today !== lastResetDate) {
-    messageCount = 0;
-    lastResetDate = today;
-    console.log(`Contatore messaggi resettato per il giorno: ${today}`);
+// Inizializza Firebase Admin SDK con le credenziali
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  // eventualmente altre config come databaseURL se serve
+});
+
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+// Middleware per controllare che la richiesta abbia un token valido Firebase
+async function authenticateToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Token mancante o non valido" });
+  }
+  const idToken = authHeader.split(" ")[1];
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.user = decodedToken; // dati utente disponibili qui
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: "Token Firebase non valido" });
   }
 }
 
-// Endpoint per leggere messaggi rimanenti
-app.get("/usage", (req, res) => {
-  resetIfNeeded();
-  const remaining = Math.max(MAX_MESSAGES_PER_DAY - messageCount, 0);
-  res.json({ remaining });
-});
-
-// Endpoint chat
-app.post("/chat", async (req, res) => {
-  resetIfNeeded();
-
-  if (messageCount >= MAX_MESSAGES_PER_DAY) {
-    return res.status(429).json({ error: "Limite giornaliero di messaggi raggiunto" });
-  }
-
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Nessun messaggio inviato" });
-
+// Proteggi la rotta /chat con autenticazione Firebase
+app.post("/chat", authenticateToken, async (req, res) => {
   try {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ error: "Nessun messaggio inviato" });
+
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -65,10 +70,7 @@ app.post("/chat", async (req, res) => {
 
     const data = await response.json();
     const botReply = data.choices?.[0]?.message?.content || "Nessuna risposta ricevuta";
-
-    messageCount++; // Incrementa contatore messaggi usati
-
-    res.json({ reply: botReply, remaining: Math.max(MAX_MESSAGES_PER_DAY - messageCount, 0) });
+    res.json({ reply: botReply });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -77,4 +79,3 @@ app.post("/chat", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server in ascolto su http://localhost:${PORT}`);
 });
-
